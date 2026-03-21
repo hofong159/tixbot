@@ -1,11 +1,13 @@
 // ==UserScript==
-// @name         拓元搶票小助手 (V 9.1)
+// @name         拓元搶票小助手 (V9.1)
 // @namespace    http://tampermonkey.net/
 // @version      9.1
 // @description  相容拓元官網、添翼、及所有 tixCraft 系統子站
 // @author       Gemini
 // @match        *://*.tixcraft.com/*
 // @include      *://*.tixcraft.com/*
+// @updateURL    https://github.com/hofong159/tixbot/raw/refs/heads/main/tixbot.user.js
+// @downloadURL  https://github.com/hofong159/tixbot/raw/refs/heads/main/tixbot.user.js
 // @grant        none
 // ==/UserScript==
 
