@@ -1,8 +1,9 @@
 // ==UserScript==
-// @name         拓元搶票小助手 (V 10.0.0)
+// ==UserScript==
+// @name         拓元搶票小助手 (V10.2 邏輯強化版)
 // @namespace    http://tampermonkey.net/
-// @version      10.1
-// @description  相容拓元官網、添翼、所有 tixCraft 子站。保留 NTP 校時與 MutationObserver，移除圖形辨識確保最高穩定度。
+// @version      10.2
+// @description  相容拓元官網、添翼等子站。新增「剩餘票數安全檢測」與「搶先購序號自動通關」機制。
 // @author       Gemini
 // @match        *://*.tixcraft.com/*
 // @include      *://*.tixcraft.com/*
@@ -18,24 +19,30 @@
         month: localStorage.getItem('tix_month') || '',
         day: localStorage.getItem('tix_day') || '',
         time: localStorage.getItem('tix_time') || '',
-        saleTime: localStorage.getItem('tix_saletime') || '' // NTP 開賣時間
+        saleTime: localStorage.getItem('tix_saletime') || '',
+        presaleCode: localStorage.getItem('tix_presale') || '' // 新增：搶先購票序號
     };
-
-    let state = { areaClicked: false, captchaFocused: false, sessionClicked: false };
+    
+    // 新增 presaleSubmitted 防止無限迴圈
+    let state = { areaClicked: false, captchaFocused: false, sessionClicked: false, presaleSubmitted: false };
 
     function createPanel() {
         if (document.getElementById('tix_panel')) return;
         const div = document.createElement('div');
         div.id = 'tix_panel';
-        div.style.cssText = 'position: fixed; bottom: 10px; right: 10px; z-index: 999999; background-color: #222; color: white; padding: 15px; border-radius: 8px; font-size: 14px; box-shadow: 0 0 10px rgba(0,0,0,0.5); font-family: sans-serif; border: 1px solid #555; width: 240px;';
+        div.style.cssText = 'position: fixed; bottom: 10px; right: 10px; z-index: 999999; background-color: #222; color: white; padding: 15px; border-radius: 8px; font-size: 14px; box-shadow: 0 0 15px rgba(0,0,0,0.8); font-family: sans-serif; border: 1px solid #555; width: 240px;';
         div.innerHTML = `
             <div style="border-bottom:1px solid #555; padding-bottom:5px; margin-bottom:10px; display:flex; justify-content:space-between; align-items:center;">
-                <span style="color:#00f2ff; font-weight:bold;">🎫 搶票助手 V10 (精簡)</span>
+                <span style="color:#00f2ff; font-weight:bold;">🎫 搶票助手 V10.2</span>
                 <span id="tix_status" style="font-weight:bold; font-size:12px; color:${config.active ? '#00ff00' : '#ffaaaa'}">${config.active ? 'RUNNING' : 'STOPPED'}</span>
             </div>
             <div style="margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;">
                 <label style="color:#ffcc00; font-weight:bold;">開賣時間(NTP)</label>
                 <input type="time" step="1" id="tix_saletime" value="${config.saleTime}" style="width:105px; text-align:center; border-radius:4px; border:none; padding:3px; color:black; font-weight:bold;">
+            </div>
+            <div style="margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;">
+                <label style="color:#ffcc00; font-weight:bold;">搶先購序號</label>
+                <input type="text" id="tix_presale" value="${config.presaleCode}" placeholder="無則免填" style="width:105px; text-align:center; border-radius:4px; border:none; padding:3px; color:black; font-weight:bold;">
             </div>
             <div style="border-top:1px dashed #555; padding-top:8px; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;">
                 <label>場次日期</label>
@@ -73,15 +80,16 @@
             localStorage.setItem('tix_day', config.day);
             localStorage.setItem('tix_time', config.time);
             localStorage.setItem('tix_saletime', config.saleTime);
+            localStorage.setItem('tix_presale', config.presaleCode);
             localStorage.setItem('tix_active', config.active);
             const statusEl = document.getElementById('tix_status');
             const btnText = document.getElementById('tix_btn_text');
             statusEl.textContent = config.active ? 'RUNNING' : 'STOPPED';
             statusEl.style.color = config.active ? '#00ff00' : '#ffaaaa';
             btnText.textContent = config.active ? '🟥 停止腳本' : '🟩 啟動腳本';
-
-            if (!config.active) {
-                state.areaClicked = false; state.captchaFocused = false; state.sessionClicked = false;
+            
+            if (!config.active) { 
+                state.areaClicked = false; state.captchaFocused = false; state.sessionClicked = false; state.presaleSubmitted = false;
             } else {
                 checkNtpAndRun();
             }
@@ -93,6 +101,7 @@
         document.getElementById('tix_day').addEventListener('input', (e) => { config.day = e.target.value; updateConfig(); });
         document.getElementById('tix_time').addEventListener('input', (e) => { config.time = e.target.value; updateConfig(); });
         document.getElementById('tix_saletime').addEventListener('input', (e) => { config.saleTime = e.target.value; updateConfig(); });
+        document.getElementById('tix_presale').addEventListener('input', (e) => { config.presaleCode = e.target.value; updateConfig(); });
         document.getElementById('tix_active').addEventListener('change', (e) => { config.active = e.target.checked; updateConfig(); });
     }
 
@@ -104,9 +113,40 @@
     function autoRun() {
         if (!config.active) return;
 
+        // --- 優先處理：搶先購票序號自動通關 ---
+        if (config.presaleCode && !state.presaleSubmitted) {
+            // 尋找疑似序號的輸入框 (排除最後一關的驗證碼輸入框)
+            const presaleInput = Array.from(document.querySelectorAll('input[type="text"]:not(#TicketForm_verifyCode), input[type="password"]')).find(el => {
+                const id = (el.id || '').toLowerCase();
+                const name = (el.name || '').toLowerCase();
+                const placeholder = (el.placeholder || '').toLowerCase();
+                return id.includes('code') || id.includes('pwd') || id.includes('password') ||
+                       name.includes('code') || name.includes('pwd') || name.includes('password') ||
+                       placeholder.includes('序號') || placeholder.includes('代碼') || placeholder.includes('密碼');
+            });
+
+            if (presaleInput && presaleInput.offsetParent !== null) {
+                log(`🔓 輸入搶先購序號...`);
+                presaleInput.value = config.presaleCode;
+                state.presaleSubmitted = true; // 上鎖，避免無限點擊
+                
+                // 尋找同一個 Form 裡的送出按鈕
+                const form = presaleInput.closest('form');
+                if (form) {
+                    const submitBtn = form.querySelector('button[type="submit"], input[type="submit"], a.btn, button.btn');
+                    if (submitBtn) {
+                        submitBtn.click();
+                    } else {
+                        form.submit();
+                    }
+                }
+                return; // 送出後中斷腳本，等待頁面跳轉
+            }
+        }
+
         // --- 第一階段：點擊大按鈕 或 場次表格 ---
         if (window.location.href.includes('/activity/detail/') || window.location.href.includes('/activity/game/')) {
-            if (state.sessionClicked) return;
+            if (state.sessionClicked) return; 
 
             const rows = Array.from(document.querySelectorAll('tr'));
             let validRows = rows.filter(tr => {
@@ -138,7 +178,7 @@
                 if (targetBtn && targetBtn.dataset.tixClicked !== 'true') {
                     log(`🚀 點選特定場次...`);
                     targetBtn.dataset.tixClicked = 'true';
-                    state.sessionClicked = true;
+                    state.sessionClicked = true; 
                     targetBtn.style.backgroundColor = '#ff0000';
                     targetBtn.style.color = '#ffffff';
                     targetBtn.click();
@@ -162,15 +202,57 @@
             state.sessionClicked = false;
         }
 
-        // --- 第二階段：區域選擇 ---
+        // --- 第二階段：區域選擇 (包含剩餘票數智能檢測) ---
         const areaList = document.querySelector('.area-list');
         if (areaList) {
             if (state.areaClicked) return;
-            let target = null;
             const areas = Array.from(areaList.querySelectorAll('a')).filter(a => !a.classList.contains('soldout'));
-            if (config.keyword) { target = areas.find(a => a.innerText.includes(config.keyword)); }
+            
+            let target = null;
+            let reqCount = parseInt(config.ticketCount) || 1; // 使用者需求的票數
+
+            // 1. 優先尋找「關鍵字符合」且「剩餘票數 >= 需求張數」的區域
+            for (let a of areas) {
+                let text = a.innerText;
+
+                // 若有設定關鍵字，且不包含該關鍵字，直接跳過
+                if (config.keyword && !text.includes(config.keyword)) continue;
+
+                // 提取「剩餘 X」的數字
+                let match = text.match(/剩餘\s*(\d+)/);
+                if (match) {
+                    let remainTickets = parseInt(match[1]);
+                    if (remainTickets < reqCount) {
+                        log(`⚠️ [${text.split('\n')[0]}] 票數不足 (${remainTickets} < ${reqCount})，跳過`);
+                        continue; // 剩餘張數小於需求，跳過此區！
+                    }
+                }
+                
+                // 條件符合 (沒有標示剩餘數量代表充足，或者剩餘數量大於需求)
+                target = a;
+                break; 
+            }
+
+            // 2. 降級防呆：如果關鍵字區域都賣完或數量不足，改抓「任何數量足夠」的區域
+            if (!target) {
+                for (let a of areas) {
+                    let match = a.innerText.match(/剩餘\s*(\d+)/);
+                    if (!match || parseInt(match[1]) >= reqCount) {
+                        target = a;
+                        break;
+                    }
+                }
+            }
+
+            // 3. 極限防呆：如果連數量夠的都沒有，抓第一個還能點的 (總比不點好)
             if (!target && areas.length > 0) target = areas[0];
-            if (target) { log(`✅ 鎖定區域: ${target.innerText}`); state.areaClicked = true; target.style.border = "5px solid red"; target.click(); }
+
+            if (target) { 
+                log(`✅ 鎖定區域: ${target.innerText.split('\n')[0]}`); 
+                state.areaClicked = true; 
+                target.style.border = "5px solid red"; 
+                target.click(); 
+            }
             return;
         }
 
@@ -178,25 +260,25 @@
         const ticketSelect = document.querySelector('select[id^="TicketForm_ticketPrice"]');
         if (ticketSelect) {
             if (state.areaClicked) state.areaClicked = false;
-
+            
             // 自動選張數
-            if (ticketSelect.value == '0') {
-                log('🔢 設定張數...');
-                let count = parseInt(config.ticketCount);
-                if (count > ticketSelect.options.length - 1) count = ticketSelect.options.length - 1;
-                ticketSelect.value = count;
-                ticketSelect.dispatchEvent(new Event('change', { bubbles: true }));
+            if (ticketSelect.value == '0') { 
+                log('🔢 設定張數...'); 
+                let count = parseInt(config.ticketCount); 
+                if (count > ticketSelect.options.length - 1) count = ticketSelect.options.length - 1; 
+                ticketSelect.value = count; 
+                ticketSelect.dispatchEvent(new Event('change', { bubbles: true })); 
             }
-
+            
             // 自動勾選同意條款
             const agree = document.getElementById('TicketForm_agree');
             if (agree && !agree.checked) { agree.click(); }
-
+            
             // 自動對焦驗證碼輸入框，準備手動輸入
             const captcha = document.getElementById('TicketForm_verifyCode');
-            if (captcha && !state.captchaFocused) {
-                state.captchaFocused = true;
-                captcha.focus();
+            if (captcha && !state.captchaFocused) { 
+                state.captchaFocused = true; 
+                captcha.focus(); 
                 log('🔥 請快速手動輸入驗證碼！');
             }
         }
@@ -211,8 +293,7 @@
         if (observer) return;
         log('👁️ 極速監視模式啟動');
         autoRun(); // 先掃描一次目前 DOM
-
-        // 使用 Observer 取代原版 setInterval，DOM 一變動立刻攔截
+        
         observer = new MutationObserver(() => {
             if (config.active) autoRun();
         });
@@ -221,28 +302,28 @@
 
     async function checkNtpAndRun() {
         if (!config.active) return;
-
+        
         // 只有在售票首頁/活動頁，且有設定開賣時間時，才啟動 NTP
         if (config.saleTime && (window.location.href.includes('/activity/detail/') || window.location.href.includes('/activity/game/'))) {
             const now = new Date();
             const [h, m, s] = config.saleTime.split(':');
-
+            
             if (h && m && s) {
                 const targetTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, s).getTime();
-
+                
                 try {
                     log('🔄 國家標準時間校時中...');
                     const res = await fetch('https://worldtimeapi.org/api/timezone/Asia/Taipei');
                     const data = await res.json();
-
+                    
                     const serverTime = new Date(data.datetime).getTime();
                     const offset = serverTime - Date.now();
                     const waitTime = targetTime - (Date.now() + offset);
 
                     // 如果開賣時間在未來的 24 小時內
-                    if (waitTime > 0 && waitTime < 86400000) {
+                    if (waitTime > 0 && waitTime < 86400000) { 
                         log(`⏱️ 校時完畢，將於 ${Math.round(waitTime/1000)} 秒後精準重整...`);
-
+                        
                         // 設定在開賣前 100 毫秒進行畫面重載 (極限壓縮網路延遲)
                         setTimeout(() => {
                             location.reload();
@@ -255,7 +336,7 @@
                 }
             }
         }
-
+        
         // 如果不需要倒數重整 (例如已經開賣了)，直接啟動極速監視
         startMutationObserver();
     }
