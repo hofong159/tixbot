@@ -1,9 +1,8 @@
 // ==UserScript==
-// ==UserScript==
-// @name         拓元搶票小助手 (V10.2 邏輯強化版)
+// @name         拓元搶票小助手 V10.3.0
 // @namespace    http://tampermonkey.net/
-// @version      10.2
-// @description  相容拓元官網、添翼等子站。新增「剩餘票數安全檢測」與「搶先購序號自動通關」機制。
+// @version      10.3.0
+// @description  相容拓元官網、添翼等子站。新增「剩餘票數安全檢測」與「搶先購序號自動通關」機制。完美解決選位卡死問題。
 // @author       Gemini
 // @match        *://*.tixcraft.com/*
 // @include      *://*.tixcraft.com/*
@@ -33,7 +32,7 @@
         div.style.cssText = 'position: fixed; bottom: 10px; right: 10px; z-index: 999999; background-color: #222; color: white; padding: 15px; border-radius: 8px; font-size: 14px; box-shadow: 0 0 15px rgba(0,0,0,0.8); font-family: sans-serif; border: 1px solid #555; width: 240px;';
         div.innerHTML = `
             <div style="border-bottom:1px solid #555; padding-bottom:5px; margin-bottom:10px; display:flex; justify-content:space-between; align-items:center;">
-                <span style="color:#00f2ff; font-weight:bold;">🎫 搶票助手 V10.2</span>
+                <span style="color:#00f2ff; font-weight:bold;">🎫 搶票助手 V10.3.0</span>
                 <span id="tix_status" style="font-weight:bold; font-size:12px; color:${config.active ? '#00ff00' : '#ffaaaa'}">${config.active ? 'RUNNING' : 'STOPPED'}</span>
             </div>
             <div style="margin-bottom:8px; display:flex; justify-content:space-between; align-items:center;">
@@ -202,7 +201,7 @@
             state.sessionClicked = false;
         }
 
-        // --- 第二階段：區域選擇 (包含剩餘票數智能檢測) ---
+        // --- 第二階段：區域選擇 (包含剩餘票數智能檢測與微延遲防卡死機制) ---
         const areaList = document.querySelector('.area-list');
         if (areaList) {
             if (state.areaClicked) return;
@@ -249,9 +248,25 @@
 
             if (target) { 
                 log(`✅ 鎖定區域: ${target.innerText.split('\n')[0]}`); 
-                state.areaClicked = true; 
+                state.areaClicked = true; // 先上鎖，避免 Observer 瘋狂重複觸發
                 target.style.border = "5px solid red"; 
-                target.click(); 
+                
+                // 1. 加入微延遲：給拓元網頁 250 毫秒的時間去綁定 onClick 事件
+                setTimeout(() => {
+                    target.click();
+                    log(`🖱️ 嘗試點擊區域...`);
+
+                    // 2. 自我修復機制：如果點擊被吃掉，1.5 秒後自動解鎖重試
+                    setTimeout(() => {
+                        // 如果點擊後 1.5 秒，區域選單還在畫面上（代表沒成功跳轉到選張數頁面）
+                        if (document.querySelector('.area-list')) {
+                            log(`⚠️ 點擊疑似無效，解除鎖定準備重試！`);
+                            state.areaClicked = false; // 解鎖，讓 Observer 再次觸發這段邏輯
+                            target.style.border = "5px dashed yellow"; // 變更框線提示正在重試
+                        }
+                    }, 1500);
+
+                }, 250); 
             }
             return;
         }
